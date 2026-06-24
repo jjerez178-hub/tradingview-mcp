@@ -31,7 +31,7 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
           else if (apiPath) await evaluate(`${apiPath}.setResolution(${safeString(tf)})`);
         }
 
-        await waitForChartReady(symbol);
+        const readiness = await waitForChartReady(symbol);
         await new Promise(r => setTimeout(r, delay));
 
         let actionResult;
@@ -74,7 +74,14 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
         } else {
           actionResult = { error: 'Unknown action or API not available: ' + action };
         }
-        results.push({ ...combo, success: true, result: actionResult });
+        results.push({
+          ...combo,
+          success: true,
+          chart_ready: readiness.ready,
+          verified: readiness.ready,
+          as_of: new Date().toISOString(),
+          result: actionResult,
+        });
       } catch (err) {
         results.push({ ...combo, success: false, error: err.message });
       }

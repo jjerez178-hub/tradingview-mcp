@@ -48,8 +48,15 @@ export async function setSymbol({ symbol, _deps }) {
       });
     })()
   `);
-  const ready = await waitForChartReady(symbol);
-  return { success: true, symbol, chart_ready: ready };
+  const readiness = await waitForChartReady(symbol);
+  return {
+    success: true,
+    symbol,
+    chart_ready: readiness.ready,
+    verified: readiness.ready,
+    as_of: new Date().toISOString(),
+    readiness,
+  };
 }
 
 export async function setTimeframe({ timeframe, _deps }) {
@@ -60,8 +67,15 @@ export async function setTimeframe({ timeframe, _deps }) {
       chart.setResolution(${safeString(timeframe)}, {});
     })()
   `);
-  const ready = await waitForChartReady(null, timeframe);
-  return { success: true, timeframe, chart_ready: ready };
+  const readiness = await waitForChartReady(null, timeframe);
+  return {
+    success: true,
+    timeframe,
+    chart_ready: readiness.ready,
+    verified: readiness.ready,
+    as_of: new Date().toISOString(),
+    readiness,
+  };
 }
 
 export async function setType({ chart_type, _deps }) {
