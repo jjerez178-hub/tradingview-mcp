@@ -53,7 +53,17 @@ export async function start({ date, _deps } = {}) {
     throw new Error('Replay failed to start. The selected date may not have data for this timeframe. Try a more recent date or a higher timeframe (e.g., Daily).');
   }
 
-  return { success: true, replay_started: true, date: date || '(first available)', current_date: currentDate };
+  // verified:true only when the data series confirmed a non-null currentDate.
+  // The poll can exit with started:true but currentDate still null — in that case
+  // the value is unconfirmed and must be flagged rather than trusted as fresh.
+  return {
+    success: true,
+    replay_started: true,
+    date: date || '(first available)',
+    current_date: currentDate,
+    verified: currentDate !== null,
+    as_of: new Date().toISOString(),
+  };
 }
 
 export async function step({ _deps } = {}) {
@@ -66,12 +76,21 @@ export async function step({ _deps } = {}) {
   // doStep() is async internally — currentDate takes ~500ms to update.
   // Poll until it changes or timeout after 3s.
   let currentDate = before;
+  let changed = false;
   for (let i = 0; i < 12; i++) {
     await new Promise(r => setTimeout(r, 250));
     currentDate = await evaluate(wv(`${rp}.currentDate()`));
-    if (currentDate !== before) break;
+    if (currentDate !== before) { changed = true; break; }
   }
-  return { success: true, action: 'step', current_date: currentDate };
+  // verified:false means the poll timed out and currentDate never advanced — the
+  // returned value is the last-known (stale) date, not a confirmed new bar.
+  return {
+    success: true,
+    action: 'step',
+    current_date: currentDate,
+    verified: changed,
+    as_of: new Date().toISOString(),
+  };
 }
 
 export async function autoplay({ speed, _deps } = {}) {
@@ -138,5 +157,13 @@ export async function status({ _deps } = {}) {
   `);
   const pos = await evaluate(wv(`${rp}.position()`));
   const pnl = await evaluate(wv(`${rp}.realizedPL()`));
-  return { success: true, ...st, position: pos, realized_pnl: pnl };
+  // status is a single direct read of live state (no poll), so it is as-of-now.
+  return {
+    success: true,
+    ...st,
+    position: pos,
+    realized_pnl: pnl,
+    verified: true,
+    as_of: new Date().toISOString(),
+  };
 }

@@ -31,7 +31,7 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
           else if (apiPath) await evaluate(`${apiPath}.setResolution(${safeString(tf)})`);
         }
 
-        await waitForChartReady(symbol);
+        const readiness = await waitForChartReady(symbol);
         await new Promise(r => setTimeout(r, delay));
 
         let actionResult;
@@ -55,6 +55,10 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
                 }).catch(reject);
             })
           `);
+          // Per-action freshness stamp — verified reflects this combo's readiness
+          // gate, so each payload carries its own provenance independent of the
+          // combo-level fields below.
+          actionResult = { ...actionResult, verified: readiness.ready, as_of: new Date().toISOString() };
         } else if (action === 'get_strategy_results') {
           await new Promise(r => setTimeout(r, 1000));
           actionResult = await evaluate(`
@@ -71,10 +75,18 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
               return { metric_count: Object.keys(metrics).length, metrics: metrics };
             })()
           `);
+          actionResult = { ...actionResult, verified: readiness.ready && !actionResult?.error, as_of: new Date().toISOString() };
         } else {
           actionResult = { error: 'Unknown action or API not available: ' + action };
         }
-        results.push({ ...combo, success: true, result: actionResult });
+        results.push({
+          ...combo,
+          success: true,
+          chart_ready: readiness.ready,
+          verified: readiness.ready,
+          as_of: new Date().toISOString(),
+          result: actionResult,
+        });
       } catch (err) {
         results.push({ ...combo, success: false, error: err.message });
       }

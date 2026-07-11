@@ -1,12 +1,37 @@
 /**
  * Core data access logic.
  */
-import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
+import { waitForChartReady as _waitForChartReady } from '../wait.js';
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
 const CHART_API = KNOWN_PATHS.chartApi;
 const BARS_PATH = KNOWN_PATHS.mainSeriesBars;
+
+function _resolve(deps) {
+  return {
+    evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+    waitForChartReady: deps?.waitForChartReady || _waitForChartReady,
+  };
+}
+
+// Stamp a gated data-reader payload with the verified/as_of freshness contract,
+// matching the shape used by replay.js and chart.js. verified is true only when
+// the chart was confirmed ready AND the read produced data. On a readiness
+// timeout the payload is still returned best-effort but flagged verified:false
+// with the readiness reason, so callers never mistake stale data for fresh.
+function _freshness(readiness, readOk) {
+  const stamp = { verified: !!(readiness.ready && readOk), as_of: new Date().toISOString() };
+  if (!readiness.ready) stamp.reason = readiness.reason;
+  return stamp;
+}
+
+// Stamp a direct live read (no readiness gate) — verified reflects read success.
+function _directFreshness(readOk) {
+  return { verified: !!readOk, as_of: new Date().toISOString() };
+}
 
 function buildGraphicsJS(collectionName, mapKey, filter) {
   return `
@@ -59,8 +84,13 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
   `;
 }
 
-export async function getOhlcv({ count, summary } = {}) {
+export async function getOhlcv({ count, summary, _deps } = {}) {
+  const { evaluate, waitForChartReady } = _resolve(_deps);
   const limit = Math.min(count || 100, MAX_OHLCV_BARS);
+  // Gate on chart readiness before reading bars — a not-ready chart can return a
+  // stale last bar that looks fresh. We do not throw on timeout; the data is
+  // returned flagged verified:false instead (see _freshness).
+  const readiness = await waitForChartReady();
   let data;
   try {
     data = await evaluate(`
@@ -83,6 +113,7 @@ export async function getOhlcv({ count, summary } = {}) {
     throw new Error('Could not extract OHLCV data. The chart may still be loading.');
   }
 
+  const fresh = _freshness(readiness, true);
   if (summary) {
     const bars = data.bars;
     const highs = bars.map(b => b.high);
@@ -100,13 +131,15 @@ export async function getOhlcv({ count, summary } = {}) {
       change_pct: Math.round(((last.close - first.open) / first.open) * 10000) / 100 + '%',
       avg_volume: Math.round(volumes.reduce((a, b) => a + b, 0) / volumes.length),
       last_5_bars: bars.slice(-5),
+      ...fresh,
     };
   }
 
-  return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
+  return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars, ...fresh };
 }
 
-export async function getIndicator({ entity_id }) {
+export async function getIndicator({ entity_id, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const data = await evaluate(`
     (function() {
       var api = ${CHART_API};
@@ -129,10 +162,11 @@ export async function getIndicator({ entity_id }) {
       return true;
     });
   }
-  return { success: true, entity_id, visible: data?.visible, inputs };
+  return { success: true, entity_id, visible: data?.visible, inputs, ..._directFreshness(true) };
 }
 
-export async function getStrategyResults() {
+export async function getStrategyResults({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const results = await evaluate(`
     (function() {
       try {
@@ -161,10 +195,11 @@ export async function getStrategyResults() {
       } catch(e) { return {metrics: {}, source: 'internal_api', error: e.message}; }
     })()
   `);
-  return { success: true, metric_count: Object.keys(results?.metrics || {}).length, source: results?.source, metrics: results?.metrics || {}, error: results?.error };
+  return { success: true, metric_count: Object.keys(results?.metrics || {}).length, source: results?.source, metrics: results?.metrics || {}, error: results?.error, ..._directFreshness(!results?.error) };
 }
 
-export async function getTrades({ max_trades } = {}) {
+export async function getTrades({ max_trades, _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const limit = Math.min(max_trades || 20, MAX_TRADES);
   const trades = await evaluate(`
     (function() {
@@ -198,10 +233,11 @@ export async function getTrades({ max_trades } = {}) {
       } catch(e) { return {trades: [], source: 'internal_api', error: e.message}; }
     })()
   `);
-  return { success: true, trade_count: trades?.trades?.length || 0, source: trades?.source, trades: trades?.trades || [], error: trades?.error };
+  return { success: true, trade_count: trades?.trades?.length || 0, source: trades?.source, trades: trades?.trades || [], error: trades?.error, ..._directFreshness(!trades?.error) };
 }
 
-export async function getEquity() {
+export async function getEquity({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const equity = await evaluate(`
     (function() {
       try {
@@ -239,10 +275,14 @@ export async function getEquity() {
       } catch(e) { return {data: [], source: 'internal_api', error: e.message}; }
     })()
   `);
-  return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note, error: equity?.error };
+  return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note, error: equity?.error, ..._directFreshness(!equity?.error) };
 }
 
-export async function getQuote({ symbol } = {}) {
+export async function getQuote({ symbol, _deps } = {}) {
+  const { evaluate, waitForChartReady } = _resolve(_deps);
+  // Gate before reading the last bar — quotes feed market-direction analysis, so
+  // a stale price on a not-ready chart is exactly the silent race we must flag.
+  const readiness = await waitForChartReady();
   const data = await evaluate(`
     (function() {
       var api = ${CHART_API};
@@ -274,10 +314,11 @@ export async function getQuote({ symbol } = {}) {
     })()
   `);
   if (!data || (!data.last && !data.close)) throw new Error('Could not retrieve quote. The chart may still be loading.');
-  return { success: true, ...data };
+  return { success: true, ...data, ..._freshness(readiness, true) };
 }
 
-export async function getDepth() {
+export async function getDepth({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const data = await evaluate(`
     (function() {
       var domPanel = document.querySelector('[class*="depth"]')
@@ -318,10 +359,12 @@ export async function getDepth() {
   `);
 
   if (!data || !data.found) throw new Error(data?.error || 'DOM panel not found.');
-  return { success: true, bid_levels: data.bids?.length || 0, ask_levels: data.asks?.length || 0, spread: data.spread, bids: data.bids || [], asks: data.asks || [], raw_values: data.raw_values, note: data.note };
+  return { success: true, bid_levels: data.bids?.length || 0, ask_levels: data.asks?.length || 0, spread: data.spread, bids: data.bids || [], asks: data.asks || [], raw_values: data.raw_values, note: data.note, ..._directFreshness(true) };
 }
 
-export async function getStudyValues() {
+export async function getStudyValues({ _deps } = {}) {
+  const { evaluate, waitForChartReady } = _resolve(_deps);
+  const readiness = await waitForChartReady();
   const data = await evaluate(`
     (function() {
       var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
@@ -354,13 +397,15 @@ export async function getStudyValues() {
       return results;
     })()
   `);
-  return { success: true, study_count: data?.length || 0, studies: data || [] };
+  return { success: true, study_count: data?.length || 0, studies: data || [], ..._freshness(readiness, true) };
 }
 
-export async function getPineLines({ study_filter, verbose } = {}) {
+export async function getPineLines({ study_filter, verbose, _deps } = {}) {
+  const { evaluate, waitForChartReady } = _resolve(_deps);
+  const readiness = await waitForChartReady();
   const filter = study_filter || '';
   const raw = await evaluate(buildGraphicsJS('dwglines', 'lines', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [], ..._freshness(readiness, true) };
 
   const studies = raw.map(s => {
     const hLevels = [];
@@ -378,13 +423,15 @@ export async function getPineLines({ study_filter, verbose } = {}) {
     if (verbose) result.all_lines = allLines;
     return result;
   });
-  return { success: true, study_count: studies.length, studies };
+  return { success: true, study_count: studies.length, studies, ..._freshness(readiness, true) };
 }
 
-export async function getPineLabels({ study_filter, max_labels, verbose } = {}) {
+export async function getPineLabels({ study_filter, max_labels, verbose, _deps } = {}) {
+  const { evaluate, waitForChartReady } = _resolve(_deps);
+  const readiness = await waitForChartReady();
   const filter = study_filter || '';
   const raw = await evaluate(buildGraphicsJS('dwglabels', 'labels', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [], ..._freshness(readiness, true) };
 
   const limit = max_labels || 50;
   const studies = raw.map(s => {
@@ -398,13 +445,15 @@ export async function getPineLabels({ study_filter, max_labels, verbose } = {}) 
     if (labels.length > limit) labels = labels.slice(-limit);
     return { name: s.name, total_labels: s.count, showing: labels.length, labels };
   });
-  return { success: true, study_count: studies.length, studies };
+  return { success: true, study_count: studies.length, studies, ..._freshness(readiness, true) };
 }
 
-export async function getPineTables({ study_filter } = {}) {
+export async function getPineTables({ study_filter, _deps } = {}) {
+  const { evaluate, waitForChartReady } = _resolve(_deps);
+  const readiness = await waitForChartReady();
   const filter = study_filter || '';
   const raw = await evaluate(buildGraphicsJS('dwgtablecells', 'tableCells', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [], ..._freshness(readiness, true) };
 
   const studies = raw.map(s => {
     const tables = {};
@@ -426,13 +475,15 @@ export async function getPineTables({ study_filter } = {}) {
     });
     return { name: s.name, tables: tableList };
   });
-  return { success: true, study_count: studies.length, studies };
+  return { success: true, study_count: studies.length, studies, ..._freshness(readiness, true) };
 }
 
-export async function getPineBoxes({ study_filter, verbose } = {}) {
+export async function getPineBoxes({ study_filter, verbose, _deps } = {}) {
+  const { evaluate, waitForChartReady } = _resolve(_deps);
+  const readiness = await waitForChartReady();
   const filter = study_filter || '';
   const raw = await evaluate(buildGraphicsJS('dwgboxes', 'boxes', filter));
-  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [], ..._freshness(readiness, true) };
 
   const studies = raw.map(s => {
     const zones = [];
@@ -450,5 +501,5 @@ export async function getPineBoxes({ study_filter, verbose } = {}) {
     if (verbose) result.all_boxes = allBoxes;
     return result;
   });
-  return { success: true, study_count: studies.length, studies };
+  return { success: true, study_count: studies.length, studies, ..._freshness(readiness, true) };
 }

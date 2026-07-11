@@ -55,6 +55,8 @@ describe('start() — date selection and polling', () => {
     assert.equal(result.replay_started, true);
     assert.equal(result.current_date, 1773532799);
     assert.equal(result.date, '2026-03-15');
+    assert.equal(result.verified, true, 'verified:true when currentDate confirmed');
+    assert.ok(result.as_of, 'as_of timestamp present');
     // Verify selectDate was called with timestamp and .then()
     const selectCall = evaluate.calls.find(c => c.includes('selectDate'));
     assert.ok(selectCall, 'selectDate was called');
@@ -161,9 +163,11 @@ describe('step() — doStep and polling', () => {
     assert.equal(result.success, true);
     assert.equal(result.current_date, 2000);
     assert.equal(result.action, 'step');
+    assert.equal(result.verified, true, 'verified:true when date advances');
+    assert.ok(result.as_of, 'as_of timestamp present');
   });
 
-  it('returns stale date if poll times out (date never changes)', async () => {
+  it('returns stale date flagged verified:false if poll times out (date never changes)', async () => {
     const evaluate = async (expr) => {
       if (expr.includes('isReplayStarted')) return true;
       if (expr.includes('currentDate')) return 5000; // never changes
@@ -173,6 +177,8 @@ describe('step() — doStep and polling', () => {
     evaluate.calls = [];
     const result = await step({ _deps: { evaluate, getReplayApi: mockGetReplayApi() } });
     assert.equal(result.current_date, 5000);
+    assert.equal(result.verified, false, 'verified:false when poll times out');
+    assert.ok(result.as_of, 'as_of timestamp present even when stale');
   });
 
   it('throws when replay not started', async () => {
@@ -350,5 +356,7 @@ describe('status()', () => {
     assert.equal(result.current_date, 1700000000);
     assert.equal(result.position, 2);
     assert.equal(result.realized_pnl, 123.45);
+    assert.equal(result.verified, true, 'status is a fresh direct read → verified');
+    assert.ok(result.as_of, 'as_of timestamp present');
   });
 });

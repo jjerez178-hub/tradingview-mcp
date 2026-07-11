@@ -34,7 +34,8 @@ export async function getState({ _deps } = {}) {
       };
     })()
   `);
-  return { success: true, ...state };
+  // Direct live read of chart state → verified on success.
+  return { success: true, ...state, verified: true, as_of: new Date().toISOString() };
 }
 
 export async function setSymbol({ symbol, _deps }) {
@@ -48,8 +49,15 @@ export async function setSymbol({ symbol, _deps }) {
       });
     })()
   `);
-  const ready = await waitForChartReady(symbol);
-  return { success: true, symbol, chart_ready: ready };
+  const readiness = await waitForChartReady(symbol);
+  return {
+    success: true,
+    symbol,
+    chart_ready: readiness.ready,
+    verified: readiness.ready,
+    as_of: new Date().toISOString(),
+    readiness,
+  };
 }
 
 export async function setTimeframe({ timeframe, _deps }) {
@@ -60,8 +68,15 @@ export async function setTimeframe({ timeframe, _deps }) {
       chart.setResolution(${safeString(timeframe)}, {});
     })()
   `);
-  const ready = await waitForChartReady(null, timeframe);
-  return { success: true, timeframe, chart_ready: ready };
+  const readiness = await waitForChartReady(null, timeframe);
+  return {
+    success: true,
+    timeframe,
+    chart_ready: readiness.ready,
+    verified: readiness.ready,
+    as_of: new Date().toISOString(),
+    readiness,
+  };
 }
 
 export async function setType({ chart_type, _deps }) {
@@ -115,14 +130,15 @@ export async function manageIndicator({ action, indicator, entity_id, inputs: in
   }
 }
 
-export async function getVisibleRange() {
+export async function getVisibleRange({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const result = await evaluate(`
     (function() {
       var chart = ${CHART_API};
       return { visible_range: chart.getVisibleRange(), bars_range: chart.getVisibleBarsRange() };
     })()
   `);
-  return { success: true, visible_range: result.visible_range, bars_range: result.bars_range };
+  return { success: true, visible_range: result.visible_range, bars_range: result.bars_range, verified: true, as_of: new Date().toISOString() };
 }
 
 export async function setVisibleRange({ from, to, _deps }) {
@@ -196,7 +212,8 @@ export async function scrollToDate({ date }) {
   return { success: true, date, centered_on: timestamp, resolution, window: { from, to } };
 }
 
-export async function symbolInfo() {
+export async function symbolInfo({ _deps } = {}) {
+  const { evaluate } = _resolve(_deps);
   const result = await evaluate(`
     (function() {
       var chart = ${CHART_API};
@@ -208,7 +225,7 @@ export async function symbolInfo() {
       };
     })()
   `);
-  return { success: true, ...result };
+  return { success: true, ...result, verified: true, as_of: new Date().toISOString() };
 }
 
 export async function symbolSearch({ query, type }) {
